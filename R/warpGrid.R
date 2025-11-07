@@ -18,9 +18,9 @@
 #' @title Grid warping
 #' @description Warp grid to allow plotting in a different projection.
 #' @param data A C4R grid (or multimember C4R grid) object, or climatology C4R grid.
-#' @param original.CRS character as passed to function \code{\link{CRS}} with the original projection. 
+#' @param original.CRS character or object as passed to function \code{\link[sf]{st_crs}} with the original projection.
 #' Default to longlat projection (\code{"+init=epsg:4326"}).
-#' @param new.CRS character string, as passed to function \code{\link{CRS}}, specifying the target projection. 
+#' @param new.CRS character string or object, as passed to function \code{\link[sf]{st_crs}}, specifying the target projection.
 #' Default to polar stereographic projection (\code{"+init=epsg:3995"}).
 #' @param int.method Resampling method. Default to \code{"bilinear"}. See details.
 #' 
@@ -35,9 +35,9 @@
 #'   \code{"cubicspline"} etc., passed to the argument \code{r} in \code{gdalUtils::gdalwarp}.
 
 #' @export
-#' @importFrom sp spplot spTransform CRS 
+#' @importFrom sf st_as_sf st_coordinates st_crs st_drop_geometry
 #' @importFrom gdalUtils gdalwarp
-#' @importFrom rgdal writeGDAL readGDAL
+#' @importFrom stars st_as_stars read_stars write_stars
 #' @import transformeR
 #' @author A. Casanueva, J. Bedia, M. Iturbide
 #' @examples
@@ -47,7 +47,7 @@
 #' # Example of application: plot in polar stereographic projection
 #' library(visualizeR)
 #' l1 <- get(load(paste0(find.package("visualizeR"), "/countries.rda"))) # world coastline
-#' l1 <- sp::spTransform(l1[[2]], CRSobj = attr(grid$xyCoords, "projection"))
+#' l1 <- sf::st_transform(sf::st_as_sf(l1[[2]]), crs = attr(grid$xyCoords, "projection"))
 #' visualizeR::spatialPlot(grid, sp.layout = list(list(l1, first = FALSE)))
 
 warpGrid <- function(data,
@@ -59,37 +59,96 @@ warpGrid <- function(data,
   nmem <- getShape(data, "member")
   member <- ifelse((nmem == 1 | is.na(nmem)), FALSE, TRUE)
   
-  # *** CONVERT GRID TO A SpatialPointsDataFrame ***
+  crs_from_input <- function(value, arg_name) {
+    if (inherits(value, "crs")) {
+      return(value)
+    }
+    if (is.null(value) || (length(value) == 1 && is.na(value))) {
+      return(sf::st_crs(NA))
+    }
+    tryCatch({
+      sf::st_crs(value)
+    }, error = function(err) {
+      stop("Non-valid ", arg_name, " argument")
+    })
+  }
+  crs_to_string <- function(crs_obj) {
+    if (is.na(crs_obj)) {
+      return(NA_character_)
+    }
+    if (!is.null(crs_obj$input) && !is.na(crs_obj$input)) {
+      return(crs_obj$input)
+    }
+    if (!is.null(crs_obj$wkt) && !is.na(crs_obj$wkt)) {
+      return(crs_obj$wkt)
+    }
+    NA_character_
+  }
+  original_crs <- crs_from_input(original.CRS, "original.CRS")
+  new_crs <- crs_from_input(new.CRS, "new.CRS")
+  original_crs_string <- crs_to_string(original_crs)
+  new_crs_string <- crs_to_string(new_crs)
+
+  # *** CONVERT GRID TO STARS ***
   pattern <- transformeR::grid2sp(data)
-  
+  pattern_stars <- stars::st_as_stars(pattern)
+  sf::st_crs(pattern_stars) <- original_crs
+
   # *** WRITE A GDAL GRID MAP ***
   outf <- tempfile(fileext = ".tif")
   suppressWarnings(
-    rgdal::writeGDAL(pattern, fname = outf, drivername = "GTiff", mvFlag = "NA")
+    stars::write_stars(pattern_stars, dsn = outf, driver = "GTiff", NA_value = NA_real_)
   )
-  
+
   # *** IMAGE RE-PROJECTION ***
   newf <- tempfile(fileext = ".tif")
+  s_srs_value <- if (is.na(original_crs_string)) NULL else original_crs_string
+  t_srs_value <- if (is.na(new_crs_string)) NULL else new_crs_string
   suppressMessages(
     gdalUtils::gdalwarp(srcfile = outf,
-                        s_srs = original.CRS,
-                        t_srs = new.CRS,
+                        s_srs = s_srs_value,
+                        t_srs = t_srs_value,
                         dstfile = newf,
                         r = int.method)
   )
   # *** READ NEW IMAGE ***
-  n <- rgdal::readGDAL(newf)
+  warped <- stars::read_stars(newf, NA_value = NA_real_)
   outf <- newf <- NULL
-  
-  # *** sp2grid ***
+
+  # *** stars2grid ***
   start <- getRefDates(data, which = "start")
   end <- getRefDates(data, which = "end")
-  
-  grid <- transformeR::sgdf2clim(sp = n,
-                                 varName = getVarNames(data),
-                                 level = getGridVerticalLevels(data),
-                                 dates = list(start = start, end = end),
-                                 season = getSeason(data))
+
+  warped_sf <- sf::st_as_sf(warped, as_points = TRUE, merge = TRUE)
+  coords_matrix <- sf::st_coordinates(warped_sf)
+  coords_df <- data.frame(x = coords_matrix[, 1], y = coords_matrix[, 2])
+  order_idx <- order(coords_df$y, coords_df$x)
+  coords_df <- coords_df[order_idx, , drop = FALSE]
+  values_matrix <- as.matrix(sf::st_drop_geometry(warped_sf))[order_idx, , drop = FALSE]
+  values_matrix[is.nan(values_matrix)] <- NA
+  data_matrix <- t(values_matrix)
+  x_vals <- unique(coords_df$x)
+  y_vals <- unique(coords_df$y)
+  gridded_data <- mat2Dto3Darray(data_matrix, x_vals, y_vals)
+  attr(gridded_data, "dimensions") <- attr(data$Data, "dimensions")
+
+  grid <- data
+  grid$Data <- gridded_data
+  if (is.list(grid$xyCoords)) {
+    grid$xyCoords$x <- x_vals
+    grid$xyCoords$y <- y_vals
+    attr(grid$xyCoords, "resX") <- if (length(x_vals) > 1) x_vals[2] - x_vals[1] else 0
+    attr(grid$xyCoords, "resY") <- if (length(y_vals) > 1) y_vals[2] - y_vals[1] else 0
+  } else {
+    grid$xyCoords <- coords_df
+    attr(grid$xyCoords, "resX") <- 0
+    attr(grid$xyCoords, "resY") <- 0
+  }
+  attr(grid$xyCoords, "projection") <- new_crs_string
+
+  attr(grid$Data, "dimensions") <- attr(data$Data, "dimensions")
+  grid$Dates <- list(start = start, end = end)
+  grid$Season <- getSeason(data)
   return(grid)
 }
 

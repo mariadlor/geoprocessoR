@@ -3,10 +3,10 @@ Depends:
     R(>= 3.5.0),
     transformeR(>= 1.6.1),
 Imports:
-    sp,
     abind,
     gdalUtils,
-    rgdal
+    sf,
+    stars
 Suggests:
     downscaleR,      
     loadeR,

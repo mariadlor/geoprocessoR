@@ -17,17 +17,17 @@
 
 
 #' @title grid datum definition and transformation
-#' @description Defines and/or transforms the projection of a grid (or station data) by means of a \code{\link[sp]{CRS}} object. 
+#' @description Defines and/or transforms the projection of a grid (or station data) by means of an \code{\link[sf]{st_crs}} object.
 #' @param grid a grid or multigrid (including station data).
-#' @param original.CRS character as passed to function \code{\link{CRS}}. It defines the original projection. If the data contains the 
+#' @param original.CRS character or object as passed to function \code{\link[sf]{st_crs}}. It defines the original projection. If the data contains the
 #' projection information, a warning is returned and the projection in redefined.
-#' @param new.CRS character as passed to function \code{\link{CRS}}.
-#' @details This function uses \code{\link{spTransform}},  \code{\link{CRS}} and \code{\link{proj4string}} from package \pkg{sp}
-#' @seealso \code{\link{spTransform}}, \code{\link{proj4string}}.
+#' @param new.CRS character or object as passed to function \code{\link[sf]{st_crs}}.
+#' @details This function uses \code{\link[sf]{st_transform}} and \code{\link[sf]{st_crs}} from package \pkg{sf}.
+#' @seealso \code{\link[sf]{st_transform}}, \code{\link[sf]{st_crs}}.
 #' 
 #' @author M. Iturbide
 #' @export
-#' @importFrom sp proj4string spTransform CRS coordinates
+#' @importFrom sf st_as_sf st_coordinates st_crs st_transform
 #' @importFrom abind abind
 #' @import transformeR
 #' @examples
@@ -55,29 +55,63 @@ projectGrid <- function(grid,
                         original.CRS = "",
                         new.CRS = "") {
   orig.datum <- attr(grid$xyCoords, "projection")
-  if (!"CRS" %in% class(original.CRS)) original.CRS <- tryCatch({CRS(original.CRS)}, error = function(err) {stop("Non-valid original.CRS argument")})
-  if (!"CRS" %in% class(new.CRS)) new.CRS <- tryCatch({CRS(new.CRS)}, error = function(err) {stop("Non-valid new.CRS argument")})
   # if (orig.datum == "RotatedPole") stop("This function is not applicable to this projection. See Details")
-  if (!is.null(orig.datum) & !is.na(original.CRS)) {
+  crs_from_input <- function(value, arg_name) {
+    if (inherits(value, "crs")) {
+      return(value)
+    }
+    if (is.null(value) || (length(value) == 1 && is.na(value))) {
+      return(sf::st_crs(NA))
+    }
+    tryCatch({
+      sf::st_crs(value)
+    }, error = function(err) {
+      stop("Non-valid ", arg_name, " argument")
+    })
+  }
+  crs_to_string <- function(crs_obj) {
+    if (is.na(crs_obj)) {
+      return(NA_character_)
+    }
+    if (!is.null(crs_obj$input) && !is.na(crs_obj$input)) {
+      return(crs_obj$input)
+    }
+    if (!is.null(crs_obj$wkt) && !is.na(crs_obj$wkt)) {
+      return(crs_obj$wkt)
+    }
+    NA_character_
+  }
+  original_crs <- crs_from_input(original.CRS, "original.CRS")
+  new_crs <- crs_from_input(new.CRS, "new.CRS")
+  if (!is.null(orig.datum) & !is.na(original_crs)) {
     warning("CAUTION! Grid with previusly defined projection: ", orig.datum)
-    attr(grid$xyCoords, "projection") <- as.character(original.CRS)
-  } else if (is.null(orig.datum) & !is.na(original.CRS)) {
-    attr(grid$xyCoords, "projection") <- as.character(original.CRS)
-  } else if (is.null(orig.datum) & is.na(original.CRS)) {
+    attr(grid$xyCoords, "projection") <- crs_to_string(original_crs)
+  } else if (is.null(orig.datum) & !is.na(original_crs)) {
+    attr(grid$xyCoords, "projection") <- crs_to_string(original_crs)
+  } else if (is.null(orig.datum) & is.na(original_crs)) {
     stop("Please define original.CRS")
-  } else if (!is.null(orig.datum) & is.na(original.CRS)) {
-    original.CRS <- orig.datum
-    if (is.character(original.CRS)) 
-      original.CRS <- tryCatch({CRS(original.CRS)}, error = function(err) {stop("Grid with non-valid defined projection. Please, use argument original.CRS to redefine it correctly")})
-  } 
+  } else if (!is.null(orig.datum) & is.na(original_crs)) {
+    original_crs <- tryCatch({
+      crs_from_input(orig.datum, "original.CRS")
+    }, error = function(err) {
+      stop("Grid with non-valid defined projection. Please, use argument original.CRS to redefine it correctly")
+    })
+    attr(grid$xyCoords, "projection") <- crs_to_string(original_crs)
+  }
+  if (is.null(attr(grid$xyCoords, "projection"))) {
+    attr(grid$xyCoords, "projection") <- crs_to_string(original_crs)
+  }
   data <- get2DmatCoordinates(grid)
-  sppoints <- SpatialPoints(data)
-  sp::proj4string(sppoints) <- original.CRS
-  message("[",Sys.time(), "] ", "Arguments of the original projection defined as ", original.CRS)
-  if (!is.na(new.CRS)) {
-    message("[",Sys.time(), "] ", "Projecting..")
-    sppoints.new <- spTransform(sppoints, new.CRS)
-    new.coords <- coordinates(sppoints.new)
+  coords_df <- as.data.frame(data)
+  if (ncol(coords_df) >= 2) {
+    colnames(coords_df)[1:2] <- c("x", "y")
+  }
+  sppoints <- sf::st_as_sf(coords_df, coords = c("x", "y"), crs = original_crs)
+  message("[", Sys.time(), "] ", "Arguments of the original projection defined as ", crs_to_string(original_crs))
+  if (!is.na(new_crs)) {
+    message("[", Sys.time(), "] ", "Projecting..")
+    sppoints.new <- sf::st_transform(sppoints, new_crs)
+    new.coords <- sf::st_coordinates(sppoints.new)
     x <- unique(new.coords[,1])
     y <- unique(new.coords[,2])
     if (length(x) > 1 & length(y) > 1) { # a single location?
@@ -107,12 +141,13 @@ projectGrid <- function(grid,
         grid <- redim(redim(grid, drop = T), member = FALSE, loc = TRUE)
       }
       grid$xyCoords <- as.data.frame(new.coords)
-      attr(grid$xyCoords, "projection") <- as.character(new.CRS)
+      colnames(grid$xyCoords) <- c("x", "y")
+      attr(grid$xyCoords, "projection") <- crs_to_string(new_crs)
       attr(grid$xyCoords, "resX") <- 0
       attr(grid$xyCoords, "resY") <- 0
     } else {
       grid$xyCoords <- list("x" = unique(new.coords[,1]), "y" = unique(new.coords[,2]))
-      attr(grid$xyCoords, "projection") <- as.character(new.CRS)
+      attr(grid$xyCoords, "projection") <- crs_to_string(new_crs)
       attr(grid$xyCoords, "resX") <- xdists[[1]]
       attr(grid$xyCoords, "resY") <- ydists[[1]]
     }

@@ -25,6 +25,6 @@
 #' grid <- warpGrid(climatology(ncep_hgt500_2000))
 #' library(visualizeR)
 #' l1 <- get(load(paste0(find.package("visualizeR"), "/countries.rda"))) # world coastline
-#' l1 <- sp::spTransform(l1[[2]], CRSobj = attr(grid$xyCoords, "projection"))
+#' l1 <- sf::st_transform(sf::st_as_sf(l1[[2]]), crs = attr(grid$xyCoords, "projection"))
 #' visualizeR::spatialPlot(grid, sp.layout = list(list(l1, first = FALSE)))
 NULL
