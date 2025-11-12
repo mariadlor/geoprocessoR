@@ -27,16 +27,15 @@
 #' @return Warped grid with the structure of a C4R grid.
 #' 
 #' @details 
-#' This function is a wrapper of the gdal warping capabilities via gdalwarp.  
+#' This function is a wrapper of the gdal warping capabilities via gdal_utils.  
 #' 
 #'  \strong{int.method}
 #'  
 #'  By default bilinear interpolation is applied to get a complete grid in the target projection. Other options are \code{"near"}, \code{"cubic"},
-#'   \code{"cubicspline"} etc., passed to the argument \code{r} in \code{gdalUtils::gdalwarp}.
+#'   \code{"cubicspline"} etc., passed to the argument \code{r} in \code{sf::gdal_utils}.
 
 #' @export
-#' @importFrom sf st_as_sf st_coordinates st_crs st_drop_geometry
-#' @importFrom gdalUtils gdalwarp
+#' @importFrom sf st_as_sf st_coordinates st_crs st_drop_geometry gdal_utils
 #' @importFrom stars st_as_stars read_stars write_stars
 #' @import transformeR
 #' @author A. Casanueva, J. Bedia, M. Iturbide
@@ -102,15 +101,21 @@ warpGrid <- function(data,
 
   # *** IMAGE RE-PROJECTION ***
   newf <- tempfile(fileext = ".tif")
-  s_srs_value <- if (is.na(original_crs_string)) NULL else original_crs_string
-  t_srs_value <- if (is.na(new_crs_string)) NULL else new_crs_string
-  suppressMessages(
-    gdalUtils::gdalwarp(srcfile = outf,
-                        s_srs = s_srs_value,
-                        t_srs = t_srs_value,
-                        dstfile = newf,
-                        r = int.method)
-  )
+  
+  warp_options <- character(0)
+  if (!is.na(original_crs_string)) {
+    warp_options <- c(warp_options, "-s_srs", original_crs_string)
+  }
+  if (!is.na(new_crs_string)) {
+    warp_options <- c(warp_options, "-t_srs", new_crs_string)
+  }
+  warp_options <- c(warp_options, "-r", int.method)
+  sf::gdal_utils(util = "warp",
+                 source = outf,
+                 destination = newf,
+                 options = warp_options,
+                 quiet = TRUE)
+                 
   # *** READ NEW IMAGE ***
   warped <- stars::read_stars(newf, NA_value = NA_real_)
   outf <- newf <- NULL

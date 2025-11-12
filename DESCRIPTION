@@ -3,8 +3,7 @@ Depends:
     R(>= 3.5.0),
     transformeR(>= 1.6.1),
 Imports:
-    abind,
-    gdalUtils,
+    abind, 
     sf,
     stars
 Suggests:
