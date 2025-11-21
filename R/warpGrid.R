@@ -65,12 +65,14 @@ warpGrid <- function(data,
 
   # *** IMAGE RE-PROJECTION ***
   warped_list <- lapply(band_names, function(nm) {
-    stars::st_warp(
-      pattern_stars[nm], 
-      dest     = pattern_stars[nm],
-      crs      = sf::st_crs(new.CRS),  
-      method   = int.method,
-      use_gdal = TRUE
+    suppressWarnings(
+      stars::st_warp(
+        pattern_stars[nm],
+        dest     = pattern_stars[nm],
+        crs      = sf::st_crs(new.CRS),
+        method   = int.method,
+        use_gdal = TRUE
+      )
     )
   })
 
