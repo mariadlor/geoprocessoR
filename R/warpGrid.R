@@ -27,16 +27,16 @@
 #' @return Warped grid with the structure of a C4R grid.
 #' 
 #' @details 
-#' This function is a wrapper of the gdal warping capabilities via gdal_utils.  
+#' This function is a wrapper of the gdal warping capabilities via \code{stars::st_warp}.
 #' 
 #'  \strong{int.method}
 #'  
 #'  By default bilinear interpolation is applied to get a complete grid in the target projection. Other options are \code{"near"}, \code{"cubic"},
-#'   \code{"cubicspline"} etc., passed to the argument \code{r} in \code{sf::gdal_utils}.
+#'   \code{"cubicspline"} etc., passed to the argument \code{method} in \code{stars::st_warp}.
 
 #' @export
-#' @importFrom sf st_as_sf st_coordinates st_crs st_drop_geometry gdal_utils
-#' @importFrom stars st_as_stars read_stars write_stars
+#' @importFrom sf st_crs
+#' @importFrom stars st_as_stars st_warp
 #' @import transformeR
 #' @author A. Casanueva, J. Bedia, M. Iturbide
 #' @examples
@@ -54,106 +54,56 @@ warpGrid <- function(data,
                      new.CRS = "+init=epsg:3995", 
                      int.method = "bilinear") {
   
-  # *** Check for members ***
-  nmem <- getShape(data, "member")
-  member <- ifelse((nmem == 1 | is.na(nmem)), FALSE, TRUE)
-  
-  crs_from_input <- function(value, arg_name) {
-    if (inherits(value, "crs")) {
-      return(value)
-    }
-    if (is.null(value) || (length(value) == 1 && is.na(value))) {
-      return(sf::st_crs(NA))
-    }
-    tryCatch({
-      sf::st_crs(value)
-    }, error = function(err) {
-      stop("Non-valid ", arg_name, " argument")
-    })
-  }
-  crs_to_string <- function(crs_obj) {
-    if (is.na(crs_obj)) {
-      return(NA_character_)
-    }
-    if (!is.null(crs_obj$input) && !is.na(crs_obj$input)) {
-      return(crs_obj$input)
-    }
-    if (!is.null(crs_obj$wkt) && !is.na(crs_obj$wkt)) {
-      return(crs_obj$wkt)
-    }
-    NA_character_
-  }
-  original_crs <- crs_from_input(original.CRS, "original.CRS")
-  new_crs <- crs_from_input(new.CRS, "new.CRS")
-  original_crs_string <- crs_to_string(original_crs)
-  new_crs_string <- crs_to_string(new_crs)
+  # *** Convert grid to sp ***
+  pattern <- transformeR::grid2sp(data) 
 
-  # *** CONVERT GRID TO STARS ***
-  pattern <- transformeR::grid2sp(data)
-  pattern_stars <- stars::st_as_stars(pattern)
-  sf::st_crs(pattern_stars) <- original_crs
-
-  # *** WRITE A GDAL GRID MAP ***
-  outf <- tempfile(fileext = ".tif")
-  suppressWarnings(
-    stars::write_stars(pattern_stars, dsn = outf, driver = "GTiff", NA_value = NA_real_)
-  )
+  # *** Convert sp to stars ***
+  suppressWarnings(sp::proj4string(pattern) <- sp::CRS(NA_character_)) # Remove invalid CRS from sp so that stars can handle it
+  pattern_stars <- stars::st_as_stars(pattern) # Convert to stars
+  sf::st_crs(pattern_stars) <- sf::st_crs(original.CRS) # Assign valid CRS to the stars object
+  band_names <- names(pattern_stars) # Preserve members 
 
   # *** IMAGE RE-PROJECTION ***
-  newf <- tempfile(fileext = ".tif")
-  
-  warp_options <- character(0)
-  if (!is.na(original_crs_string)) {
-    warp_options <- c(warp_options, "-s_srs", original_crs_string)
-  }
-  if (!is.na(new_crs_string)) {
-    warp_options <- c(warp_options, "-t_srs", new_crs_string)
-  }
-  warp_options <- c(warp_options, "-r", int.method)
-  sf::gdal_utils(util = "warp",
-                 source = outf,
-                 destination = newf,
-                 options = warp_options,
-                 quiet = TRUE)
-                 
-  # *** READ NEW IMAGE ***
-  warped <- stars::read_stars(newf, NA_value = NA_real_)
-  outf <- newf <- NULL
+  warped_list <- lapply(band_names, function(nm) {
+    stars::st_warp(
+      pattern_stars[nm], 
+      dest     = pattern_stars[nm],
+      crs      = sf::st_crs(new.CRS),  
+      method   = int.method,
+      use_gdal = TRUE
+    )
+  })
 
-  # *** stars2grid ***
+  # *** Convert stars to sp ***
+
+  # First member
+  warped_sp <- as(warped_list[[1]], "Spatial")
+
+  # Add extra members as columns 
+  if (length(warped_list) > 1) { 
+    extra_cols <- lapply(warped_list[-1], function(w) {
+      sp_tmp <- as(w, "Spatial")
+      sp_tmp@data[, 1]         
+    })
+    warped_sp@data <- data.frame(
+      warped_sp@data,
+      do.call(cbind, extra_cols)
+    )
+  }
+
+  # Make sure column names match original member names
+  names(warped_sp@data) <- band_names
+
+  outf <- newf <- NULL
+  
+  # *** Convert sp to grid ***
   start <- getRefDates(data, which = "start")
   end <- getRefDates(data, which = "end")
-
-  warped_sf <- sf::st_as_sf(warped, as_points = TRUE, merge = TRUE)
-  coords_matrix <- sf::st_coordinates(warped_sf)
-  coords_df <- data.frame(x = coords_matrix[, 1], y = coords_matrix[, 2])
-  order_idx <- order(coords_df$y, coords_df$x)
-  coords_df <- coords_df[order_idx, , drop = FALSE]
-  values_matrix <- as.matrix(sf::st_drop_geometry(warped_sf))[order_idx, , drop = FALSE]
-  values_matrix[is.nan(values_matrix)] <- NA
-  data_matrix <- t(values_matrix)
-  x_vals <- unique(coords_df$x)
-  y_vals <- unique(coords_df$y)
-  gridded_data <- mat2Dto3Darray(data_matrix, x_vals, y_vals)
-  attr(gridded_data, "dimensions") <- attr(data$Data, "dimensions")
-
-  grid <- data
-  grid$Data <- gridded_data
-  if (is.list(grid$xyCoords)) {
-    grid$xyCoords$x <- x_vals
-    grid$xyCoords$y <- y_vals
-    attr(grid$xyCoords, "resX") <- if (length(x_vals) > 1) x_vals[2] - x_vals[1] else 0
-    attr(grid$xyCoords, "resY") <- if (length(y_vals) > 1) y_vals[2] - y_vals[1] else 0
-  } else {
-    grid$xyCoords <- coords_df
-    attr(grid$xyCoords, "resX") <- 0
-    attr(grid$xyCoords, "resY") <- 0
-  }
-  attr(grid$xyCoords, "projection") <- new_crs_string
-
-  attr(grid$Data, "dimensions") <- attr(data$Data, "dimensions")
-  grid$Dates <- list(start = start, end = end)
-  grid$Season <- getSeason(data)
-  return(grid)
+  
+  grid <- transformeR::sgdf2clim(sp = warped_sp,
+                                 varName = getVarNames(data),
+                                 level = getGridVerticalLevels(data),
+                                 dates = list(start = start, end = end),
+                                 season = getSeason(data))
 }
 
