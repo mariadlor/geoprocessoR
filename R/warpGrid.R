@@ -27,16 +27,16 @@
 #' @return Warped grid with the structure of a C4R grid.
 #' 
 #' @details 
-#' This function is a wrapper of the gdal warping capabilities via \code{stars::st_warp}.
+#' This function is a wrapper of the GDAL warping capabilities via \code{sf::gdal_utils("warp")}.
 #' 
 #'  \strong{int.method}
 #'  
 #'  By default bilinear interpolation is applied to get a complete grid in the target projection. Other options are \code{"near"}, \code{"cubic"},
-#'   \code{"cubicspline"} etc., passed to the argument \code{method} in \code{stars::st_warp}.
+#'   \code{"cubicspline"} etc., passed to GDAL through the \code{-r} option.
 
 #' @export
-#' @importFrom sf st_crs
-#' @importFrom stars st_as_stars st_warp
+#' @importFrom sf st_crs gdal_utils
+#' @importFrom stars st_as_stars read_stars write_stars
 #' @import transformeR
 #' @author A. Casanueva, J. Bedia, M. Iturbide
 #' @examples
@@ -54,58 +54,91 @@ warpGrid <- function(data,
                      new.CRS = "+init=epsg:3995", 
                      int.method = "bilinear") {
   
-  # *** Convert grid to sp ***
-  pattern <- transformeR::grid2sp(data) 
-
-  # *** Convert sp to stars ***
-  suppressWarnings(sp::proj4string(pattern) <- sp::CRS(NA_character_)) # Remove invalid CRS from sp so that stars can handle it
-  pattern_stars <- stars::st_as_stars(pattern) # Convert to stars
-  sf::st_crs(pattern_stars) <- sf::st_crs(original.CRS) # Assign valid CRS to the stars object
-  band_names <- names(pattern_stars) # Preserve members 
-
-  # *** IMAGE RE-PROJECTION ***
-  warped_list <- lapply(band_names, function(nm) {
-    suppressWarnings(
-      stars::st_warp(
-        pattern_stars[nm],
-        dest     = pattern_stars[nm],
-        crs      = sf::st_crs(new.CRS),
-        method   = int.method,
-        use_gdal = TRUE
-      )
-    )
-  })
-
-  # *** Convert stars to sp ***
-
-  # First member
-  warped_sp <- as(warped_list[[1]], "Spatial")
-
-  # Add extra members as columns 
-  if (length(warped_list) > 1) { 
-    extra_cols <- lapply(warped_list[-1], function(w) {
-      sp_tmp <- as(w, "Spatial")
-      sp_tmp@data[, 1]         
-    })
-    warped_sp@data <- data.frame(
-      warped_sp@data,
-      do.call(cbind, extra_cols)
-    )
+  # *** Helper functions to handle CRS ***
+  crs_from_input <- function(value, arg_name) {
+    if (inherits(value, "crs")) return(value)
+    tryCatch(sf::st_crs(value), error = function(e) stop("Non-valid ", arg_name, " argument"))
   }
 
-  # Make sure column names match original member names
-  names(warped_sp@data) <- band_names
+  crs_to_gdal_string <- function(crs_obj, arg_name) {
+    if (is.na(crs_obj)) stop("Non-valid ", arg_name, " argument")
+    if (!is.null(crs_obj$input) && !is.na(crs_obj$input) && nzchar(crs_obj$input)) return(crs_obj$input)
+    if (!is.null(crs_obj$wkt) && !is.na(crs_obj$wkt) && nzchar(crs_obj$wkt)) return(crs_obj$wkt)
+    stop("Non-valid ", arg_name, " argument")
+  }
 
-  outf <- newf <- NULL
-  
-  # *** Convert sp to grid ***
+  original_crs <- crs_from_input(original.CRS, "original.CRS")
+  new_crs <- crs_from_input(new.CRS, "new.CRS")
+
+  original_crs_txt <- crs_to_gdal_string(original_crs, "original.CRS")
+  new_crs_txt <- crs_to_gdal_string(new_crs, "new.CRS")
+
+  # *** Convert C4R grid to stars ***
+  pattern <- transformeR::grid2sp(data)
+  pattern_stars <- suppressWarnings(stars::st_as_stars(pattern))
+  sf::st_crs(pattern_stars) <- original_crs
+  band_names <- names(pattern_stars)
+
+  # *** Warp each band/member separately with GDAL ***
+  nodata_value <- -9999
+
+  warped_list <- lapply(band_names, function(nm) {
+    srcfile <- tempfile(fileext = ".tif")
+    dstfile <- tempfile(fileext = ".tif")
+    on.exit(unlink(c(srcfile, dstfile), force = TRUE), add = TRUE)
+
+    # Write the current band/member to a temporary GeoTIFF file with the original CRS
+    suppressWarnings(
+      stars::write_stars(
+        pattern_stars[nm],
+        dsn = srcfile,
+        driver = "GTiff",
+        NA_value = nodata_value))
+
+    # Warp the GeoTIFF file to the new CRS using GDAL via sf::gdal_utils
+    sf::gdal_utils(
+      util = "warp",
+      source = srcfile,
+      destination = dstfile,
+      options = c(
+        "-s_srs", original_crs_txt,
+        "-t_srs", new_crs_txt,
+        "-r", int.method,
+        "-dstnodata", as.character(nodata_value)),
+      quiet = TRUE)
+
+    suppressWarnings(stars::read_stars(dstfile, proxy = FALSE))
+  })
+
+  # *** Convert warped bands back to Spatial and recombine members ***
+  warped_sp <- methods::as(warped_list[[1]], "Spatial")
+
+  # Normalize nodata in first band
+  if (!is.null(warped_sp@data) && ncol(warped_sp@data) >= 1) {
+    warped_sp@data[[1]][warped_sp@data[[1]] == nodata_value] <- NA_real_
+  }
+
+  if (length(warped_list) > 1) {
+    extra_cols <- lapply(warped_list[-1], function(w) {
+      sp_tmp <- methods::as(w, "Spatial")
+      v <- sp_tmp@data[[1]]
+      v[v == nodata_value] <- NA_real_
+      v
+    })
+    warped_sp@data <- data.frame(warped_sp@data, do.call(cbind, extra_cols))
+  }
+  names(warped_sp@data) <- band_names 
+
+  # *** Back to C4R grid ***
   start <- getRefDates(data, which = "start")
   end <- getRefDates(data, which = "end")
-  
-  grid <- transformeR::sgdf2clim(sp = warped_sp,
-                                 varName = getVarNames(data),
-                                 level = getGridVerticalLevels(data),
-                                 dates = list(start = start, end = end),
-                                 season = getSeason(data))
-}
 
+  grid <- transformeR::sgdf2clim(
+    sp = warped_sp,
+    varName = getVarNames(data),
+    level = getGridVerticalLevels(data),
+    dates = list(start = start, end = end),
+    season = getSeason(data))
+
+  return(grid)
+} 
